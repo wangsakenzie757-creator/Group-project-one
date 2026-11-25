@@ -116,7 +116,7 @@ void setup() {
   //---------------------------------MQTT----------------------------------------
   
   //connecting to the mqtt broker
-  secureClient.setInsecure();  // encrypt connection
+  secureClient.useBuiltinCACertBundle();  // encrypt connection
   client.setServer(MQTT_SERVER, 8883); //stores the adress
 
   //connecting to the mqtt for 15 seconds
