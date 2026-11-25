@@ -53,20 +53,6 @@ void fail(const char* msg) {
 #define TIME_TO_SLEEP  120           // 2 minutes 
 #define CONNECT_TIMEOUT 15000
 
-
-
-//--------------------------FAILURE FUNCTION------------------------
-
-String errors = "";        // everything that went wrong in this cycle
-
-//prints the failure and stores it, it does NOT go to sleep
-void fail(const char* msg) {
-  Serial.println(msg);
-  if (errors.length() > 0) errors += "; ";
-  errors += msg;
-}
-
-
 //------------------------------DEEP SLEEP FUNCTION-------------------------
 void goToSleep(){
   sen.stopMeasurement();
@@ -184,7 +170,7 @@ void setup() {
     client.loop();                       // keep the MQTT connection alive
 
     senValid = (sen.readMeasuredValues(pm1, pm25, pm4, pm10, aaa, bbb, voc, nox, co2) == 0 && pm25 < 6553.0);
-    if (!pmValid) fail("SEN66 PM values not valid");
+    if (!senValid) fail("SEN66 PM values not valid");
   }
  
    if (bmeValid) {
