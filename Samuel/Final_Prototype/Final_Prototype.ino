@@ -16,7 +16,10 @@
 #include <Wire.h>
 #include <Adafruit_BME280.h>
 #include <SensirionI2cSen66.h>
-
+#include <time.h>
+#include <Arduino_JSON.h>
+#include <base64.h>
+#include <mbedtls/md.h>
 
 //-----------------------CONNECTION IDS---------------------------
 const char* WIFI_SSID   = "......";  //wifi name
@@ -123,13 +126,15 @@ void setup() {
   }
   Serial.println("WiFi connected!");
 
-
+  // Get current time for future usage
+  configTime(0, 0, "time.cloudflare.com");
 
   //---------------------------------MQTT----------------------------------------
   
   //connecting to the mqtt broker
   secureClient.useBuiltinCACertBundle();  // encrypt connection
   client.setServer(MQTT_SERVER, 8883); //stores the adress
+  client.setBufferSize(2048);
   //client.setKeepAlive(60);   //keeps the connection alive for 60
 
   //connecting to the mqtt for 15 seconds
@@ -224,46 +229,65 @@ void setup() {
 
   //publishing the values to the mqtt, must be a text not a number 
   //if only one data is not sent the whole publish fails
-  char payload[16];
-  bool ok = true;
+  JSONVar innerPayload;
   
+  time_t now = 0;
+  time(&now);
+  while (now < 1000000000L) {
+    Serial.println("Waiting for time...");
+    client.loop();
+    delay(500);
+    time(&now);
+  }
+  Serial.println(now);
+  innerPayload["timestamp"] = (long) now;
 
   if (senValid) {
-    snprintf(payload, sizeof(payload), "%.1f", pm1);
-    ok &= client.publish("esp32/sen66/pm1", payload);
-
-    snprintf(payload, sizeof(payload), "%.1f", pm25);
-    ok &= client.publish("esp32/sen66/pm25", payload);
-
-    snprintf(payload, sizeof(payload), "%.1f", pm10);
-    ok &= client.publish("esp32/sen66/pm10", payload);
+    innerPayload["pm1"] = pm1;
+    innerPayload["pm25"] = pm25;
+    innerPayload["pm10"] = pm10;
   }
   
 
   if (bmeValid) {
-    snprintf(payload, sizeof(payload), "%.1f", temp);
-    ok &= client.publish("esp32/bme280/temperature", payload);
-
-    snprintf(payload, sizeof(payload), "%.1f", hum);
-    ok &= client.publish("esp32/bme280/humidity", payload);
-
-    snprintf(payload, sizeof(payload), "%.1f", press);
-    ok &= client.publish("esp32/bme280/pressure", payload);
+    innerPayload["temperature"] = temp;
+    innerPayload["humidity"] = hum;
+    innerPayload["pressure"] = press;
   }
 
-  //checks if the data were send
-  if (!ok) fail("Publish failed");
-
-
-
-  //--------------------------------PUBLISH FAILURES OR OK-----------------------------
 
   if (errors.length() > 0) {
-    client.publish("esp32/status", errors.c_str());   // all failures in one message
+    innerPayload["status"] = errors;
   }
   else {
-    client.publish("esp32/status", "OK");
+    innerPayload["status"] = "OK";
   }
+
+  String innerPayloadString = JSON.stringify(innerPayload);
+
+  unsigned char k[32] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+  };
+  unsigned char a[32];
+  if (mbedtls_md_hmac(
+    mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+    k, 32,
+    (const unsigned char*) innerPayloadString.c_str(), innerPayloadString.length(),
+    a
+  )) fail("Failed to authenticate message");
+
+  JSONVar outerPayload;
+
+  outerPayload["data"] = innerPayloadString;
+  outerPayload["auth"] = base64::encode(a, 32);
+
+  String outerPayloadString = JSON.stringify(outerPayload);
+
+  Serial.println(outerPayloadString);
+
+  //checks if the data were send
+  if (!client.publish("esp32/authenticated_data", outerPayloadString.c_str())) fail("Publish failed");
 
   client.loop();                         // let the messages upload
   delay(500);
