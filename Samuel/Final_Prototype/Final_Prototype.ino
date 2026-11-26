@@ -40,7 +40,8 @@ SensirionI2cSen66 sen;
 //----------------------DEEP SLEEP FACTOR--------------------------
 #define uS_TO_S_FACTOR 1000000ULL    // microseconds factor
 #define TIME_TO_SLEEP  120           // 2 minutes 
-#define CONNECT_TIMEOUT 15000
+#define TIME_TO_SLEEP_ERR  60        // 1 minute
+#define CONNECT_TIMEOUT 30000
 
 
 
@@ -57,12 +58,23 @@ void fail(const char* msg) {
 
 
 //------------------------------DEEP SLEEP FUNCTION-------------------------
-void goToSleep(){
+unsigned long woken = 0;
+
+void goToSleep(bool fastRetry) {
   sen.stopMeasurement();
   if (client.connected()) client.disconnect();
+  if (WiFi.isConnected()) WiFi.disconnect();
   Serial.println("Going to sleep...");
   Serial.flush();            //ensures everything is send and done before deep sleep 
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+  uint64_t to_sleep_for = TIME_TO_SLEEP * uS_TO_S_FACTOR;
+  if (fastRetry) {
+    to_sleep_for = TIME_TO_SLEEP_ERR * uS_TO_S_FACTOR;
+  }
+  unsigned long duty_on = micros() - woken;
+  if (duty_on >= to_sleep_for) {
+    esp_restart();
+  }
+  esp_sleep_enable_timer_wakeup(to_sleep_for - duty_on);
   esp_deep_sleep_start();
 }
 
@@ -73,10 +85,9 @@ void goToSleep(){
 //--------------------------------------MAIN CODE---------------------------------------
 
 void setup() {
-
+  woken = micros();
   Serial.begin(115200);
-  Wire.begin(21, 22);  
-  sen.begin(Wire, SEN66_I2C_ADDR_6B);
+  Wire.begin(21, 22);
   delay(500);
 
 
@@ -85,14 +96,14 @@ void setup() {
   
   bool bmeOk = bme.begin(0x76);
 
-  sen.stopMeasurement();               // reset the sensor to a clean state
-  delay(1000);
+  sen.begin(Wire, SEN66_I2C_ADDR_6B);
+  bool senOk = sen.deviceReset() == 0; // reset the sensor to a clean state
 
-  bool senOk = (sen.startContinuousMeasurement() == 0);
+  // senOk &= sen.startFanCleaning() == 0;
+  // if (senOk) delay(12000);
 
-  delay(40000);
-
-
+  senOk &= sen.startContinuousMeasurement() == 0;
+  unsigned long senWaitUntil = millis() + 40000;
 
   //--------------------------------WIFI----------------------------------------
   //connecting to the wifi
@@ -108,7 +119,7 @@ void setup() {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi failed");     // no WiFi = no way to publish
-    goToSleep();
+    goToSleep(true);
   }
   Serial.println("WiFi connected!");
 
@@ -117,7 +128,7 @@ void setup() {
   //---------------------------------MQTT----------------------------------------
   
   //connecting to the mqtt broker
-  secureClient.setInsecure();  // encrypt connection
+  secureClient.useBuiltinCACertBundle();  // encrypt connection
   client.setServer(MQTT_SERVER, 8883); //stores the adress
   //client.setKeepAlive(60);   //keeps the connection alive for 60
 
@@ -132,7 +143,7 @@ void setup() {
 
   if (!client.connected()) {
     Serial.println("MQTT failed");     // no MQTT = no way to publish
-    goToSleep();
+    goToSleep(true);
   }
   Serial.println("MQTT connected!");
 
@@ -168,7 +179,7 @@ void setup() {
 
   //reading and checking values from sen
   float pm1 = 0, pm25 = 0, pm4 = 0, pm10 = 0;
-  float aaa, bbb, voc, nox;              // required by the function, not used
+  float humSen, tempSen, voc, nox;              // required by the function, not used
   uint16_t co2;
   bool senValid = false;
 
@@ -176,22 +187,34 @@ void setup() {
   //gives pm1, pm25 and pm10 their values
   //checks if it can read them, needs 10 seconds to reboot the sensor and get valuable data
   if (senOk) {
-    //delay(30000);                        // sensor warm-up
-    client.loop();                       // keep the MQTT connection alive
+    while (senWaitUntil > millis()) {
+      client.loop();                       // keep the MQTT connection alive
+      Serial.print(".");
+      delay(1000);
+    }
+    Serial.println();
 
-    senValid = (sen.readMeasuredValues(pm1, pm25, pm4, pm10, aaa, bbb, voc, nox, co2) == 0 && pm25 < 6553.0);
+    SEN66DeviceStatus status;
+
+    senValid = (sen.readMeasuredValues(pm1, pm25, pm4, pm10, humSen, tempSen, voc, nox, co2) == 0 && pm25 < 6553.0);
+    senValid &= sen.readDeviceStatus(status) == 0;
+    senValid &= status.value == 0;
     if (!senValid) fail("SEN66 PM values not valid");
   }
  
    if (bmeValid) {
+    Serial.println("===BME280 Data===");
     Serial.printf("Temp: %.1f C\n", temp);
     Serial.printf("Humidity: %.1f %%\n", hum);
     Serial.printf("Pressure: %.1f hPa\n", press);
   }
   if (senValid) {
+    Serial.println("===SEN66 Data===");
     Serial.printf("PM 1.0: %.1f ug/m3\n", pm1);
     Serial.printf("PM 2.5: %.1f ug/m3\n", pm25);
-    Serial.printf("PM 10: %.1f ug/m3\n\n", pm10);
+    Serial.printf("PM 10: %.1f ug/m3\n", pm10);
+    Serial.printf("Temp: %.1f C\n", tempSen);
+    Serial.printf("Humidity: %.1f %%\n", humSen);
   }
 
   
@@ -254,7 +277,7 @@ void setup() {
   }
 
   //enables sleep mode
-  goToSleep();
+  goToSleep(errors.length() > 0);
 }
 
 void loop() {
