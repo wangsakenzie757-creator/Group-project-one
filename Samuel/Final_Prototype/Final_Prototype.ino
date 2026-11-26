@@ -19,8 +19,8 @@
 
 
 //-----------------------CONNECTION IDS---------------------------
-const char* WIFI_SSID   = "#########";  //wifi name
-const char* WIFI_PASS   = "#########";  //wifi password 
+const char* WIFI_SSID   = "......";  //wifi name
+const char* WIFI_PASS   = ".....";  //wifi password 
 const char* MQTT_SERVER = "q6800e68.ala.eu-central-1.emqxsl.com"; //mqtt broker adress
 const char* MQTT_USER   = "SamDodo";   //mqtt username
 const char* MQTT_PASS   = "Samdodo1.";  //mqtt password 
@@ -37,8 +37,16 @@ SensirionI2cSen66 sen;
 
 
 
-//----------------------FAILURE STORAGE----------------------------
-String errors = "";                  // everything that went wrong in this cycle
+//----------------------DEEP SLEEP FACTOR--------------------------
+#define uS_TO_S_FACTOR 1000000ULL    // microseconds factor
+#define TIME_TO_SLEEP  120           // 2 minutes 
+#define CONNECT_TIMEOUT 15000
+
+
+
+//--------------------------FAILURE FUNCTION------------------------
+
+String errors = "";        // everything that went wrong in this cycle
 
 //prints the failure and stores it, it does NOT go to sleep
 void fail(const char* msg) {
@@ -47,11 +55,6 @@ void fail(const char* msg) {
   errors += msg;
 }
 
-
-//----------------------DEEP SLEEP FACTOR--------------------------
-#define uS_TO_S_FACTOR 1000000ULL    // microseconds factor
-#define TIME_TO_SLEEP  120           // 2 minutes 
-#define CONNECT_TIMEOUT 15000
 
 //------------------------------DEEP SLEEP FUNCTION-------------------------
 void goToSleep(){
@@ -81,15 +84,13 @@ void setup() {
   //-----------------------------------START BME280 and SEN66--------------------------------------
   
   bool bmeOk = bme.begin(0x76);
-  if (!bmeOk) fail("BME280 not found, check wiring/address");  //sends it to the mqtt
-  else Serial.println("BME connected!");
 
   sen.stopMeasurement();               // reset the sensor to a clean state
   delay(1000);
 
   bool senOk = (sen.startContinuousMeasurement() == 0);
-  if (!senOk) fail("SEN66 not found, check wiring");
-  else Serial.println("SEN connected!");
+
+  delay(40000);
 
 
 
@@ -116,8 +117,9 @@ void setup() {
   //---------------------------------MQTT----------------------------------------
   
   //connecting to the mqtt broker
-  secureClient.useBuiltinCACertBundle();  // encrypt connection
+  secureClient.setInsecure();  // encrypt connection
   client.setServer(MQTT_SERVER, 8883); //stores the adress
+  //client.setKeepAlive(60);   //keeps the connection alive for 60
 
   //connecting to the mqtt for 15 seconds
   start = millis();
@@ -137,6 +139,14 @@ void setup() {
 
 
   //----------------------------------READING VALUES----------------------------
+
+  //Checking the connection with the sensors
+  if (!bmeOk) fail("BME280 not found, check wiring/address");  //sends it to the mqtt
+  else Serial.println("BME connected!");
+
+  if (!senOk) fail("SEN66 not found, check wiring");
+  else Serial.println("SEN connected!");
+
 
   //reading and checking values from bme
   //reading from the sensor 
@@ -166,7 +176,7 @@ void setup() {
   //gives pm1, pm25 and pm10 their values
   //checks if it can read them, needs 10 seconds to reboot the sensor and get valuable data
   if (senOk) {
-    delay(10000);                        // sensor warm-up
+    //delay(30000);                        // sensor warm-up
     client.loop();                       // keep the MQTT connection alive
 
     senValid = (sen.readMeasuredValues(pm1, pm25, pm4, pm10, aaa, bbb, voc, nox, co2) == 0 && pm25 < 6553.0);
@@ -235,7 +245,13 @@ void setup() {
   client.loop();                         // let the messages upload
   delay(500);
 
-  Serial.println(errors.length() > 0 ? "Finished with failures" : "Data sent");
+  if (errors.length() > 0) {
+  Serial.print("Failures: ");
+  Serial.println(errors);
+  }
+  else {
+    Serial.println("Everything OK, data sent");
+  }
 
   //enables sleep mode
   goToSleep();
