@@ -20,6 +20,11 @@
 #include <Arduino_JSON.h>
 #include <base64.h>
 #include <mbedtls/md.h>
+#include <NetworkUdp.h>
+#include "client.h"
+#include "protocol.h"
+
+NetworkUDP udp;
 
 //-----------------------CONNECTION IDS---------------------------
 const char* WIFI_SSID   = "......";  //wifi name
@@ -126,8 +131,46 @@ void setup() {
   }
   Serial.println("WiFi connected!");
 
-  // Get current time for future usage
-  configTime(0, 0, "time.cloudflare.com");
+  // Do a Roughtime time synchronization
+  uint64_t rough_time = 0;
+  uint64_t rough_time_our = 0;
+
+  udp.begin(WiFi.localIP(), 12345);
+  for (int j = 0; j < 5; j++) {
+    uint8_t nonce[roughtime::kNonceLength];
+    esp_fill_random(nonce, sizeof(nonce));
+    const std::string request = roughtime::CreateRequest(nonce);
+    udp.beginPacket("162.159.200.123", 2003); // Cloudflare Roughtime
+    udp.write((const uint8_t*) request.data(), request.size());
+    udp.endPacket();
+
+    uint8_t recv_buf[roughtime::kMinRequestSize];
+
+    for (int i = 0; i < 500; i++) {
+      if (udp.parsePacket() > 0) {
+        break;
+      }
+      delay(1);
+    }
+    if (udp.available() == 0) continue;
+    int buf_len = udp.read(recv_buf, roughtime::kMinRequestSize);
+    roughtime::rough_time_t timestamp;
+    uint32_t radius;
+    std::string error;
+    unsigned char public_key[32] = {
+      0xd0, 0x60, 0xfb, 0x73, 0x7c, 0x8f, 0xf3, 0x11, 0x1c, 0xe1, 0x99, 0x76, 0xcd, 0xeb, 0x8d, 0xd9, 
+      0x29, 0x4b, 0xbc, 0x35, 0x55, 0xa1, 0xc8, 0xec, 0x3d, 0x22, 0xfc, 0xfd, 0x19, 0x7f, 0xef, 0x38
+    }; // Cloudflare Roughtime
+    if (roughtime::ParseResponse(
+            &timestamp, &radius, &error,
+            public_key, recv_buf,
+            buf_len, nonce)) {
+      rough_time = timestamp;
+      rough_time_our = micros();
+      break;
+    }
+    fail(error.c_str());
+  }
 
   //---------------------------------MQTT----------------------------------------
   
@@ -231,16 +274,7 @@ void setup() {
   //if only one data is not sent the whole publish fails
   JSONVar innerPayload;
   
-  time_t now = 0;
-  time(&now);
-  while (now < 1000000000L) {
-    Serial.println("Waiting for time...");
-    client.loop();
-    delay(500);
-    time(&now);
-  }
-  Serial.println(now);
-  innerPayload["timestamp"] = (long) now;
+  innerPayload["timestamp"] = (unsigned long) ((rough_time + (micros() - rough_time_our)) / 1000000); // roughtime
 
   if (senValid) {
     innerPayload["pm1"] = pm1;
